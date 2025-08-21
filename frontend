@@ -1,0 +1,252 @@
+import streamlit as st
+import pandas as pd
+from backend import *
+
+st.set_page_config(layout="wide")
+st.title("💪 Personal Fitness Tracker")
+
+# Use session state to manage the logged-in user
+if 'user_id' not in st.session_state:
+    st.session_state.user_id = None
+
+# Sidebar for user login and profile management
+st.sidebar.header("User Profile")
+if st.session_state.user_id:
+    user_info = get_user_profile(st.session_state.user_id)
+    if user_info:
+        st.sidebar.success(f"Logged in as *{user_info[0]}*")
+        if st.sidebar.button("Logout"):
+            st.session_state.user_id = None
+            st.experimental_rerun()
+
+    # Profile Update
+    st.sidebar.subheader("Update Profile")
+    with st.sidebar.form("update_profile_form"):
+        new_name = st.text_input("Name", value=user_info[0])
+        new_email = st.text_input("Email", value=user_info[1])
+        new_weight = st.number_input("Weight (kg)", value=user_info[2])
+        submit_update = st.form_submit_button("Update Profile")
+        if submit_update:
+            try:
+                update_user_profile(st.session_state.user_id, new_name, new_email, new_weight)
+                st.success("Profile updated successfully!")
+            except Exception as e:
+                st.error(f"Error updating profile: {e}")
+
+else:
+    st.sidebar.subheader("Login or Register")
+    login_option = st.sidebar.radio("Choose an option:", ["Login", "Register"])
+    if login_option == "Register":
+        with st.sidebar.form("register_form"):
+            reg_name = st.text_input("Name")
+            reg_email = st.text_input("Email")
+            reg_weight = st.number_input("Weight (kg)")
+            register_button = st.form_submit_button("Register")
+            if register_button:
+                try:
+                    user_id = create_user(reg_name, reg_email, reg_weight)
+                    st.session_state.user_id = user_id
+                    st.success("Registration successful! You are now logged in.")
+                    st.experimental_rerun()
+                except Exception as e:
+                    st.error(f"Registration failed: {e}")
+
+    elif login_option == "Login":
+        with st.sidebar.form("login_form"):
+            login_email = st.text_input("Email")
+            login_button = st.form_submit_button("Login")
+            if login_button:
+                # In a real app, you would add password authentication here.
+                # For this example, we'll just get the user by email.
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT user_id FROM users WHERE email = %s;", (login_email,))
+                user_data = cur.fetchone()
+                cur.close()
+                conn.close()
+                if user_data:
+                    st.session_state.user_id = user_data[0]
+                    st.success("Login successful!")
+                    st.experimental_rerun()
+                else:
+                    st.error("User not found. Please register.")
+
+# Main content area
+if st.session_state.user_id:
+    user_id = st.session_state.user_id
+    
+    # Create tabs for different sections
+    tab1, tab2, tab3, tab4 = st.tabs(["Workout Tracker", "Goals", "Social & Leaderboard", "Business Insights"])
+    
+    with tab1:
+        st.header("Log Your Workout")
+        
+        with st.form("new_workout_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                workout_date = st.date_input("Date")
+            with col2:
+                duration = st.number_input("Duration (minutes)", min_value=1)
+            
+            # Use a list to store exercises
+            if 'exercises' not in st.session_state:
+                st.session_state.exercises = []
+
+            st.subheader("Add Exercises")
+            exercise_name = st.text_input("Exercise Name")
+            col_ex1, col_ex2, col_ex3 = st.columns(3)
+            with col_ex1:
+                reps = st.number_input("Reps", min_value=1, value=1)
+            with col_ex2:
+                sets = st.number_input("Sets", min_value=1, value=1)
+            with col_ex3:
+                weight = st.number_input("Weight (kg)", min_value=0.0)
+
+            add_exercise_button = st.form_submit_button("Add Exercise")
+            if add_exercise_button:
+                st.session_state.exercises.append({"name": exercise_name, "reps": reps, "sets": sets, "weight": weight})
+                st.success("Exercise added to this workout!")
+            
+            st.subheader("Current Exercises for this Workout")
+            for i, ex in enumerate(st.session_state.exercises):
+                st.write(f"{i+1}. {ex['name']}** - {ex['sets']} sets of {ex['reps']} reps at {ex['weight']} kg")
+
+            submit_workout_button = st.form_submit_button("Log Workout")
+            if submit_workout_button:
+                if st.session_state.exercises:
+                    try:
+                        workout_id = create_workout(user_id, workout_date, duration)
+                        for ex in st.session_state.exercises:
+                            add_exercise_to_workout(workout_id, ex['name'], ex['reps'], ex['sets'], ex['weight'])
+                        st.success("Workout logged successfully!")
+                        st.session_state.exercises = []  # Clear the list
+                    except Exception as e:
+                        st.error(f"Failed to log workout: {e}")
+                else:
+                    st.warning("Please add at least one exercise before logging the workout.")
+        
+        st.subheader("Workout History")
+        workouts = get_user_workouts(user_id)
+        if workouts:
+            workout_df = pd.DataFrame(workouts, columns=["Workout ID", "Date", "Duration (min)"])
+            st.dataframe(workout_df)
+            
+            selected_workout_id = st.selectbox("Select a workout to view exercises:", workout_df["Workout ID"])
+            if selected_workout_id:
+                exercises = get_workout_exercises(selected_workout_id)
+                if exercises:
+                    exercise_df = pd.DataFrame(exercises, columns=["Exercise", "Reps", "Sets", "Weight (kg)"])
+                    st.subheader(f"Exercises for Workout ID: {selected_workout_id}")
+                    st.dataframe(exercise_df)
+                else:
+                    st.info("No exercises logged for this workout.")
+
+    with tab2:
+        st.header("Set Your Goals")
+        
+        with st.form("new_goal_form"):
+            goal_description = st.text_input("Goal Description")
+            target_value = st.number_input("Target Value", min_value=1, value=1)
+            create_goal_button = st.form_submit_button("Create Goal")
+            if create_goal_button:
+                try:
+                    create_goal(user_id, goal_description, target_value)
+                    st.success("Goal created successfully!")
+                except Exception as e:
+                    st.error(f"Failed to create goal: {e}")
+        
+        st.subheader("Your Goals")
+        goals = get_user_goals(user_id)
+        if goals:
+            for goal in goals:
+                goal_id, desc, target, current, completed = goal
+                st.write(f"*Goal:* {desc}")
+                st.write(f"*Progress:* {current} / {target}")
+                
+                new_current = st.number_input("Update Progress:", min_value=0, value=current, key=f"goal_prog_{goal_id}")
+                is_completed = st.checkbox("Mark as Completed", value=completed, key=f"goal_comp_{goal_id}")
+                
+                col_goal_update, col_goal_delete = st.columns(2)
+                with col_goal_update:
+                    if st.button("Update Goal", key=f"update_btn_{goal_id}"):
+                        try:
+                            update_goal_progress(goal_id, new_current, is_completed)
+                            st.success("Goal updated!")
+                        except Exception as e:
+                            st.error(f"Failed to update goal: {e}")
+                with col_goal_delete:
+                    if st.button("Delete Goal", key=f"delete_btn_{goal_id}"):
+                        try:
+                            delete_goal(goal_id)
+                            st.success("Goal deleted!")
+                        except Exception as e:
+                            st.error(f"Failed to delete goal: {e}")
+                st.markdown("---")
+        else:
+            st.info("You haven't set any goals yet.")
+
+    with tab3:
+        st.header("Social & Leaderboard")
+        
+        col_friends, col_leader = st.columns(2)
+        with col_friends:
+            st.subheader("Manage Friends")
+            all_users = get_all_users() # A new function needed in backend
+            if all_users:
+                users_dict = {name: uid for uid, name in all_users}
+                friend_name = st.selectbox("Select a user to add:", list(users_dict.keys()))
+                if st.button("Add Friend"):
+                    try:
+                        friend_id = users_dict[friend_name]
+                        add_friendship(user_id, friend_id)
+                        st.success(f"Friendship with {friend_name} added!")
+                    except Exception as e:
+                        st.error(f"Failed to add friend: {e}")
+
+            st.subheader("Your Friends List")
+            friends_list = get_friends_list(user_id)
+            if friends_list:
+                friends_df = pd.DataFrame(friends_list, columns=["ID", "Name"])
+                st.dataframe(friends_df)
+                
+                friend_id_to_remove = st.selectbox("Select a friend to remove:", friends_df["ID"])
+                if st.button("Remove Friend"):
+                    try:
+                        remove_friendship(user_id, friend_id_to_remove)
+                        st.success("Friend removed.")
+                    except Exception as e:
+                        st.error(f"Failed to remove friend: {e}")
+        
+        with col_leader:
+            st.subheader("Weekly Leaderboard")
+            leaderboard_data = get_leaderboard(user_id)
+            if leaderboard_data:
+                leaderboard_df = pd.DataFrame(leaderboard_data, columns=["Name", "Total Minutes"])
+                st.dataframe(leaderboard_df)
+            else:
+                st.info("No leaderboard data available. Add some friends and log some workouts!")
+
+    with tab4:
+        st.header("Business Insights")
+        
+        st.subheader("Your Workout Summary")
+        summary = get_user_workout_summary(user_id)
+        if summary and summary[0] is not None:
+            total_workouts, total_duration, avg_duration, min_duration, max_duration = summary
+            st.metric("Total Workouts", value=int(total_workouts) if total_workouts is not None else 0)
+            st.metric("Total Workout Time (min)", value=int(total_duration) if total_duration is not None else 0)
+            st.metric("Average Workout Time (min)", value=f"{avg_duration:.2f}" if avg_duration is not None else "N/A")
+            st.metric("Shortest Workout (min)", value=int(min_duration) if min_duration is not None else 0)
+            st.metric("Longest Workout (min)", value=int(max_duration) if max_duration is not None else 0)
+        else:
+            st.info("No workout data to show insights for.")
+            
+# A helper function to get all users for the social tab
+def get_all_users():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, name FROM users;")
+    users = cur.fetchall()
+    cur.close()
+    conn.close()
+    return users
