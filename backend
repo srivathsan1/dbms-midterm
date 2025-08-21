@@ -1,0 +1,356 @@
+# backend_fitness.py
+# This file handles all database interactions for the fitness tracker.
+# It uses psycopg2 for PostgreSQL connectivity.
+
+import psycopg2
+import uuid
+import datetime
+
+# --- Database Connection Details ---
+# IMPORTANT: Replace these with your PostgreSQL connection details.
+DB_NAME = "fitness_tracker_30224"
+DB_USER = "postgres"
+DB_PASSWORD = "Vasini@2013"
+DB_HOST = "localhost"
+DB_PORT = "5433"
+
+def get_db_connection():
+    """Establishes and returns a database connection."""
+    try:
+        conn = psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT
+        )
+        return conn
+    except psycopg2.OperationalError as e:
+        print(f"Error connecting to database: {e}")
+        return None
+
+def create_tables():
+    """Creates all necessary tables if they don't exist."""
+    conn = get_db_connection()
+    if not conn:
+        return
+    cur = conn.cursor()
+    try:
+        # User Profile Table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id VARCHAR(255) PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                weight DECIMAL(5, 2)
+            );
+        """)
+        # Friend Connections Table (many-to-many relationship)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS friends (
+                user_id VARCHAR(255) REFERENCES users(user_id),
+                friend_id VARCHAR(255) REFERENCES users(user_id),
+                PRIMARY KEY (user_id, friend_id)
+            );
+        """)
+        # Workout Table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS workouts (
+                workout_id VARCHAR(255) PRIMARY KEY,
+                user_id VARCHAR(255) REFERENCES users(user_id),
+                workout_date DATE NOT NULL,
+                duration_minutes INT NOT NULL
+            );
+        """)
+        # Exercises Table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS exercises (
+                exercise_id VARCHAR(255) PRIMARY KEY,
+                workout_id VARCHAR(255) REFERENCES workouts(workout_id),
+                exercise_name VARCHAR(255) NOT NULL,
+                reps INT,
+                sets INT,
+                weight DECIMAL(5, 2)
+            );
+        """)
+        # Goals Table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS goals (
+                goal_id VARCHAR(255) PRIMARY KEY,
+                user_id VARCHAR(255) REFERENCES users(user_id),
+                description TEXT NOT NULL,
+                target_value DECIMAL(10, 2) NOT NULL,
+                is_completed BOOLEAN DEFAULT FALSE
+            );
+        """)
+        conn.commit()
+    except (psycopg2.DatabaseError, Exception) as e:
+        conn.rollback()
+        print(f"Error creating tables: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+# --- User Profile and Friends CRUD ---
+
+def create_user(name, email, weight=None):
+    """Creates a new user profile."""
+    conn = get_db_connection()
+    if not conn:
+        return False, "Database connection failed."
+    cur = conn.cursor()
+    try:
+        user_id = str(uuid.uuid4())
+        cur.execute(
+            "INSERT INTO users (user_id, name, email, weight) VALUES (%s, %s, %s, %s);",
+            (user_id, name, email, weight)
+        )
+        conn.commit()
+        return True, "User created successfully!", user_id
+    except (psycopg2.IntegrityError) as e:
+        conn.rollback()
+        return False, "User with this email already exists.", None
+    except (psycopg2.DatabaseError, Exception) as e:
+        conn.rollback()
+        return False, f"Error creating user: {e}", None
+    finally:
+        cur.close()
+        conn.close()
+
+def get_user_by_email(email):
+    """Fetches a user profile by email."""
+    conn = get_db_connection()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT user_id, name, email, weight FROM users WHERE email = %s;", (email,))
+        user = cur.fetchone()
+        return user
+    except (psycopg2.DatabaseError, Exception) as e:
+        print(f"Error fetching user: {e}")
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+def add_friend(user_id, friend_email):
+    """Adds a friend connection."""
+    conn = get_db_connection()
+    if not conn:
+        return False, "Database connection failed."
+    cur = conn.cursor()
+    try:
+        # First, find the friend's user_id
+        friend_user = get_user_by_email(friend_email)
+        if not friend_user:
+            return False, "Friend with this email does not exist."
+        friend_id = friend_user[0]
+
+        if user_id == friend_id:
+            return False, "You cannot add yourself as a friend."
+        
+        # Check if friendship already exists
+        cur.execute(
+            "SELECT 1 FROM friends WHERE user_id = %s AND friend_id = %s;",
+            (user_id, friend_id)
+        )
+        if cur.fetchone():
+            return False, "You are already friends with this user."
+
+        # Insert bidirectional friendship
+        cur.execute(
+            "INSERT INTO friends (user_id, friend_id) VALUES (%s, %s);",
+            (user_id, friend_id)
+        )
+        cur.execute(
+            "INSERT INTO friends (user_id, friend_id) VALUES (%s, %s);",
+            (friend_id, user_id)
+        )
+        conn.commit()
+        return True, "Friend added successfully!"
+    except (psycopg2.DatabaseError, Exception) as e:
+        conn.rollback()
+        return False, f"Error adding friend: {e}"
+    finally:
+        cur.close()
+        conn.close()
+
+def remove_friend(user_id, friend_email):
+    """Removes a friend connection."""
+    conn = get_db_connection()
+    if not conn:
+        return False, "Database connection failed."
+    cur = conn.cursor()
+    try:
+        friend_user = get_user_by_email(friend_email)
+        if not friend_user:
+            return False, "Friend not found."
+        friend_id = friend_user[0]
+
+        cur.execute(
+            "DELETE FROM friends WHERE (user_id = %s AND friend_id = %s) OR (user_id = %s AND friend_id = %s);",
+            (user_id, friend_id, friend_id, user_id)
+        )
+        conn.commit()
+        if cur.rowcount > 0:
+            return True, "Friend removed successfully."
+        return False, "Friendship not found."
+    except (psycopg2.DatabaseError, Exception) as e:
+        conn.rollback()
+        return False, f"Error removing friend: {e}"
+    finally:
+        cur.close()
+        conn.close()
+
+def get_friends(user_id):
+    """Fetches a list of the user's friends."""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT u.name, u.email FROM friends f JOIN users u ON f.friend_id = u.user_id WHERE f.user_id = %s;",
+            (user_id,)
+        )
+        friends = cur.fetchall()
+        return friends
+    except (psycopg2.DatabaseError, Exception) as e:
+        print(f"Error fetching friends: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
+
+# --- Workout and Exercise CRUD ---
+
+def log_workout(user_id, workout_date, duration_minutes, exercises):
+    """Logs a new workout with associated exercises."""
+    conn = get_db_connection()
+    if not conn:
+        return False, "Database connection failed."
+    cur = conn.cursor()
+    try:
+        workout_id = str(uuid.uuid4())
+        cur.execute(
+            "INSERT INTO workouts (workout_id, user_id, workout_date, duration_minutes) VALUES (%s, %s, %s, %s);",
+            (workout_id, user_id, workout_date, duration_minutes)
+        )
+        for exercise in exercises:
+            exercise_id = str(uuid.uuid4())
+            cur.execute(
+                "INSERT INTO exercises (exercise_id, workout_id, exercise_name, reps, sets, weight) VALUES (%s, %s, %s, %s, %s, %s);",
+                (exercise_id, workout_id, exercise[0], exercise[1], exercise[2], exercise[3])
+            )
+        conn.commit()
+        return True, "Workout logged successfully!"
+    except (psycopg2.DatabaseError, Exception) as e:
+        conn.rollback()
+        return False, f"Error logging workout: {e}"
+    finally:
+        cur.close()
+        conn.close()
+
+def get_user_workouts(user_id):
+    """Fetches all workouts for a specific user."""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT workout_date, duration_minutes FROM workouts WHERE user_id = %s ORDER BY workout_date DESC;",
+            (user_id,)
+        )
+        workouts = cur.fetchall()
+        return workouts
+    except (psycopg2.DatabaseError, Exception) as e:
+        print(f"Error fetching workouts: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
+
+# --- Goal Setting CRUD ---
+
+def set_goal(user_id, description, target_value):
+    """Sets a new personal goal for the user."""
+    conn = get_db_connection()
+    if not conn:
+        return False, "Database connection failed."
+    cur = conn.cursor()
+    try:
+        goal_id = str(uuid.uuid4())
+        cur.execute(
+            "INSERT INTO goals (goal_id, user_id, description, target_value) VALUES (%s, %s, %s, %s);",
+            (goal_id, user_id, description, target_value)
+        )
+        conn.commit()
+        return True, "Goal set successfully!"
+    except (psycopg2.DatabaseError, Exception) as e:
+        conn.rollback()
+        return False, f"Error setting goal: {e}"
+    finally:
+        cur.close()
+        conn.close()
+
+def get_user_goals(user_id):
+    """Fetches all goals for a specific user."""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT description, target_value, is_completed FROM goals WHERE user_id = %s;",
+            (user_id,)
+        )
+        goals = cur.fetchall()
+        return goals
+    except (psycopg2.DatabaseError, Exception) as e:
+        print(f"Error fetching goals: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
+
+# --- Leaderboard and Reporting ---
+
+def get_leaderboard_data(user_id):
+    """
+    Calculates and returns leaderboard data for the current week,
+    ranking friends (and the user) by total workout minutes.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    try:
+        # Get the start of the current week (e.g., Monday)
+        today = datetime.date.today()
+        start_of_week = today - datetime.timedelta(days=today.weekday())
+        
+        # Get a list of the user and their friends' IDs
+        friend_ids = [row[0] for row in cur.execute("SELECT friend_id FROM friends WHERE user_id = %s;", (user_id,)).fetchall()]
+        all_ids = [user_id] + friend_ids
+        
+        # Get total workout minutes for each user for the current week
+        query = """
+            SELECT u.name, COALESCE(SUM(w.duration_minutes), 0)
+            FROM users u
+            LEFT JOIN workouts w ON u.user_id = w.user_id
+            WHERE u.user_id IN %s
+            AND w.workout_date >= %s
+            GROUP BY u.name
+            ORDER BY SUM(w.duration_minutes) DESC;
+        """
+        cur.execute(query, (tuple(all_ids), start_of_week))
+        leaderboard_data = cur.fetchall()
+        return leaderboard_data
+    except (psycopg2.DatabaseError, Exception) as e:
+        print(f"Error fetching leaderboard data: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
